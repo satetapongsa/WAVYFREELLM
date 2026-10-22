@@ -9,7 +9,7 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_BASE_URL;
 
 const API_URL = `${BASE_URL}/v1/chat/completions`;
 const STATS_URL = `${BASE_URL}/v1/token-stats`;
-const API_KEY = import.meta.env.VITE_API_KEY || "freellmapi-de8a023fe9fa683dea39442bfc2ee422fabef2acecbc4d57";
+const API_KEY = import.meta.env.VITE_API_KEY || "";
 const MODEL_NAME = import.meta.env.VITE_MODEL_NAME || "auto:default";
 
 // Vercel Serverless / Backend DB API endpoints (Neon)

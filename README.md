@@ -124,8 +124,9 @@ npm run dev
 5. ไปที่หัวข้อ **Environment Variables** แล้วเพิ่ม:
    - **`DATABASE_URL`**:
      ```
-     postgresql://neondb_owner:npg_RXx2bKvQkNo0@ep-divine-darkness-ao3xdpbn-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+     postgresql://username:password@ep-your-instance.aws.neon.tech/neondb?sslmode=require
      ```
+   - **`VITE_API_KEY`**: ใส่ API Key ของ LLM Gateway
    - *(หากใช้ Backend Gateway ภายนอก)* เพิ่ม `VITE_API_BASE_URL`
 6. กดปุ่ม **Deploy** ระบบจะ Build และเปิดใช้งานเว็บแอปพลิเคชันของคุณทันที!
 
