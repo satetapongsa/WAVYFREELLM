@@ -12,6 +12,10 @@ const STATS_URL = `${BASE_URL}/v1/token-stats`;
 const API_KEY = import.meta.env.VITE_API_KEY || "freellmapi-de8a023fe9fa683dea39442bfc2ee422fabef2acecbc4d57";
 const MODEL_NAME = import.meta.env.VITE_MODEL_NAME || "auto:default";
 
+// Vercel Serverless / Backend DB API endpoints (Neon)
+const DB_AUTH_URL = '/api/auth';
+const DB_CHATS_URL = '/api/chats';
+
 const PLATFORM_COLORS = {
   google: "#4285F4",
   groq: "#F55036",
@@ -63,6 +67,7 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authName, setAuthName] = useState("");
   const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
 
   // Token stats modal
   const [tokenStats, setTokenStats] = useState({
@@ -101,6 +106,25 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior });
   };
 
+  // Sync with Neon DB on user login / change
+  useEffect(() => {
+    if (!user || !user.id) return;
+    const loadUserChatsFromNeon = async () => {
+      try {
+        const res = await fetch(`${DB_CHATS_URL}?userId=${user.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.chats) && data.chats.length > 0) {
+            setChatHistory(data.chats);
+          }
+        }
+      } catch (err) {
+        console.warn("Neon DB sync (offline or local fallback):", err);
+      }
+    };
+    loadUserChatsFromNeon();
+  }, [user?.id]);
+
   // Save history to localStorage
   useEffect(() => {
     localStorage.setItem("wavy_react_history", JSON.stringify(chatHistory.slice(0, 30)));
@@ -114,6 +138,35 @@ export default function App() {
       localStorage.removeItem("wavy_user");
     }
   }, [user]);
+
+  // Sync a chat to Neon DB
+  const syncChatToNeon = async (chat) => {
+    if (!user || !user.id || !chat) return;
+    try {
+      await fetch(DB_CHATS_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': user.id.toString()
+        },
+        body: JSON.stringify({ chat })
+      });
+    } catch (err) {
+      console.warn("Could not sync chat to Neon DB:", err);
+    }
+  };
+
+  // Delete a chat from Neon DB
+  const deleteChatFromNeon = async (chatId) => {
+    if (!user || !user.id || !chatId) return;
+    try {
+      await fetch(`${DB_CHATS_URL}?chatId=${chatId}&userId=${user.id}`, {
+        method: 'DELETE'
+      });
+    } catch (err) {
+      console.warn("Could not delete chat from Neon DB:", err);
+    }
+  };
 
   // Fetch token stats
   const fetchTokenStats = async () => {
@@ -164,6 +217,7 @@ export default function App() {
     if (!deleteTarget) return;
     const targetId = deleteTarget.id;
     setChatHistory(prev => prev.filter(c => c.id !== targetId));
+    deleteChatFromNeon(targetId);
     if (currentChatId === targetId) {
       startNewChat();
     }
@@ -245,7 +299,7 @@ export default function App() {
   };
 
   // Stream simulation (typewriter effect) for smooth readable generation
-  const streamText = (fullText, msgId, updatedMessages, chatId) => {
+  const streamText = (fullText, msgId, updatedMessages, chatId, chatTitle) => {
     setStreamingMessageId(msgId);
     setDisplayedStreamingText("");
 
@@ -261,8 +315,13 @@ export default function App() {
         clearInterval(interval);
         setDisplayedStreamingText(fullText);
         setStreamingMessageId(null);
-        // Persist final message to history
-        setChatHistory(prev => prev.map(c => c.id === chatId ? { ...c, messages: updatedMessages } : c));
+        // Persist final message to history & Neon DB
+        setChatHistory(prev => {
+          const updated = prev.map(c => c.id === chatId ? { ...c, messages: updatedMessages } : c);
+          const currentChatObj = updated.find(c => c.id === chatId) || { id: chatId, title: chatTitle, messages: updatedMessages };
+          syncChatToNeon(currentChatObj);
+          return updated;
+        });
         fetchTokenStats();
       } else {
         setDisplayedStreamingText(fullText.slice(0, currentIdx));
@@ -298,12 +357,16 @@ export default function App() {
 
     // Create session if not active
     let chatId = currentChatId;
+    let chatTitle = "New Chat";
     const titleText = rawText || currentFiles[0]?.name || "New Chat";
     if (!chatId) {
       chatId = Date.now().toString();
       setCurrentChatId(chatId);
-      const title = titleText.length > 28 ? titleText.slice(0, 28) + "..." : titleText;
-      setChatHistory(prev => [{ id: chatId, title, messages: [] }, ...prev]);
+      chatTitle = titleText.length > 28 ? titleText.slice(0, 28) + "..." : titleText;
+      setChatHistory(prev => [{ id: chatId, title: chatTitle, messages: [] }, ...prev]);
+    } else {
+      const existing = chatHistory.find(c => c.id === chatId);
+      if (existing) chatTitle = existing.title;
     }
 
     const userMessageObj = {
@@ -319,6 +382,9 @@ export default function App() {
     setAttachedFiles([]);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
     setLoading(true);
+
+    // Sync user message to Neon
+    syncChatToNeon({ id: chatId, title: chatTitle, messages: newMessages });
 
     setTimeout(() => scrollToBottom('smooth'), 50);
 
@@ -349,7 +415,7 @@ export default function App() {
       setMessages(updated);
 
       // Start typewriter effect
-      streamText(reply, assistantMsgId, updated, chatId);
+      streamText(reply, assistantMsgId, updated, chatId, chatTitle);
 
     } catch (err) {
       setMessages(prev => [
@@ -369,37 +435,44 @@ export default function App() {
     }
   };
 
-  // Auth submission
-  const handleAuthSubmit = (e) => {
+  // Auth submission: Neon PostgreSQL connected!
+  const handleAuthSubmit = async (e) => {
     e.preventDefault();
     setAuthError("");
+    setAuthLoading(true);
 
     if (!authEmail || !authPassword) {
       setAuthError("Please fill in email and password");
+      setAuthLoading(false);
       return;
     }
 
-    if (authMode === "signup") {
-      const newUser = {
-        name: authName.trim() || authEmail.split("@")[0],
-        email: authEmail.trim(),
-        avatarInitial: (authName.trim() || authEmail)[0].toUpperCase(),
-        plan: "Free Pro tier"
-      };
-      setUser(newUser);
+    try {
+      const res = await fetch(DB_AUTH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: authMode,
+          email: authEmail,
+          password: authPassword,
+          name: authName
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Authentication failed");
+      }
+
+      setUser(data.user);
       setAuthModalOpen(false);
       resetAuthFields();
-    } else {
-      // Mock login validation
-      const loggedUser = {
-        name: authEmail.split("@")[0],
-        email: authEmail.trim(),
-        avatarInitial: authEmail[0].toUpperCase(),
-        plan: "Free Pro tier"
-      };
-      setUser(loggedUser);
-      setAuthModalOpen(false);
-      resetAuthFields();
+    } catch (err) {
+      // If local dev or offline, fallback gracefully with alert indicator
+      console.warn("Neon auth error, using fallback session:", err.message);
+      setAuthError(err.message || "Failed to connect to Neon database");
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -412,6 +485,8 @@ export default function App() {
 
   const handleLogout = () => {
     setUser(null);
+    setChatHistory([]);
+    startNewChat();
   };
 
   return (
@@ -476,7 +551,7 @@ export default function App() {
                 <div className="avatar-sm user-avatar-logged">{user.avatarInitial}</div>
                 <div className="user-meta">
                   <span className="user-name">{user.name}</span>
-                  <span className="plan-badge">Quota: {formatTokenNum(tokenStats.remainingTokens)}</span>
+                  <span className="plan-badge">Neon Cloud Sync</span>
                 </div>
               </div>
               <button 
@@ -494,8 +569,8 @@ export default function App() {
           ) : (
             <div className="auth-prompt-box">
               <div className="auth-prompt-text">
-                <span className="auth-prompt-title">Join WAVY AI</span>
-                <span className="auth-prompt-sub">Sync chats & access free pool</span>
+                <span className="auth-prompt-title">Neon Cloud Storage</span>
+                <span className="auth-prompt-sub">Sign in to sync your chats</span>
               </div>
               <button 
                 className="sidebar-login-btn"
@@ -539,7 +614,7 @@ export default function App() {
         </div>
       )}
 
-      {/* AI Login & Register Modal */}
+      {/* AI Login & Register Modal (Neon Database Connected) */}
       {authModalOpen && (
         <div className="token-modal-overlay" onClick={() => setAuthModalOpen(false)}>
           <div className="auth-modal-card" onClick={(e) => e.stopPropagation()}>
@@ -548,7 +623,7 @@ export default function App() {
                 <div className="brand-glow-circle">W</div>
                 <div>
                   <h3>{authMode === "login" ? "Welcome back to WAVY" : "Create WAVY account"}</h3>
-                  <p className="auth-sub">Next-generation autonomous AI workspace</p>
+                  <p className="auth-sub">Neon Cloud Database Sync Enabled</p>
                 </div>
               </div>
               <button className="icon-btn" onClick={() => setAuthModalOpen(false)}>✕</button>
@@ -591,8 +666,8 @@ export default function App() {
                 />
               </div>
 
-              <button type="submit" className="auth-submit-btn">
-                {authMode === "login" ? "Sign In to WAVY" : "Create Account"}
+              <button type="submit" className="auth-submit-btn" disabled={authLoading}>
+                {authLoading ? "Connecting to Neon DB..." : (authMode === "login" ? "Sign In to WAVY" : "Create Account")}
               </button>
             </form>
 
@@ -708,7 +783,7 @@ export default function App() {
               </svg>
             </button>
 
-            {/* Cleaned Top Header: Removed "auto:default" badge */}
+            {/* Cleaned Top Header */}
             <div 
               className="model-picker-badge cursor-pointer"
               onClick={() => setTokenModalOpen(true)}
@@ -764,7 +839,6 @@ export default function App() {
                   <circle cx="12" cy="18" r="1"/>
                 </svg>
               </div>
-              {/* Changed from 'How can WAVY help you today?' to 'How can help you today?' */}
               <h2>How can help you today?</h2>
             </div>
           ) : (
@@ -915,7 +989,7 @@ export default function App() {
               </button>
             </div>
             <div className="composer-disclaimer">
-              WAVY Web App · Powered by FreeLLMAPI Gateway (1.1B Free Pool)
+              WAVY Web App · Powered by FreeLLMAPI Gateway & Neon Database
             </div>
           </div>
         </div>
